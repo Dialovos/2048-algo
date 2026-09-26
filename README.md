@@ -57,7 +57,11 @@ The panel's **Train** trains in a background worker in the 2048.org tab: no term
 
 ### Files
 
-Each network is a set of files in `weights/` (gitignored): `NAME.bin` (the weights, 268 MB), `NAME.tc` (adaptive-rate state, 536 MB), `NAME.json` (totals), `NAME.log` (every progress line and conversion note), and `NAME.history.jsonl` (the dashboard's charts).
+The trained `weights/alpha-single.bin` (256 MiB) is versioned with Git LFS. With Git LFS installed, run `git lfs pull` after cloning or pulling this repository to download it, then select the file with **Load weights** in the panel.
+
+Each network is a set of files in `weights/`: `NAME.bin` (the weights, 268 MB), `NAME.tc` (adaptive-rate state, 536 MB), `NAME.json` (totals), `NAME.log` (every progress line and conversion note), and `NAME.history.jsonl` (the dashboard's charts). Only `alpha-single.bin` is tracked; other networks, training state, and logs remain gitignored.
+
+When using the workspace's shared Git hooks, upload committed weight updates with `git lfs push origin HEAD` before pushing the branch.
 
 ### Reading the progress
 

@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.scratch/
+.env
+.env.*
+!.env.example
+
+# Trained networks (268 MB each) and their logs
+weights/

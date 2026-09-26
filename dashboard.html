@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2048 Algo Training</title>
+<style>
+  :root {
+    --bg: #faf8ef; --card: #ffffff; --line: #e6ded2; --text: #5c544b; --muted: #8a8177;
+    --accent: #8f7a66; --accent-text: #f9f6f2; --danger: #c0533a;
+    --series-1: #8f7a66; --series-2: #e8743b; --bar: #edc22e; --bar-bg: #eee4da;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1f1c19; --card: #2a2622; --line: #3d3731; --text: #ece6de; --muted: #a79d92;
+      --accent: #a8917b; --accent-text: #1f1c19; --danger: #e07a5f;
+      --series-1: #c9b39c; --series-2: #f0925f; --bar: #e0b72a; --bar-bg: #3d3731;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  h1 { font-size: 22px; margin: 0; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  .pill { padding: 4px 12px; border-radius: 999px; background: var(--bar-bg); font-weight: 600; }
+  .pill.on { background: var(--bar); color: #3b3025; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; min-width: 0; }
+  .wide { grid-column: 1 / -1; }
+  label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 13px; }
+  select, input[type=text], input[type=number] { width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px;
+    background: var(--bg); color: var(--text); font: inherit; }
+  input[type=range] { width: 100%; }
+  button, .button { display: inline-block; padding: 7px 14px; border: 0; border-radius: 5px; background: var(--accent); color: var(--accent-text);
+    font: inherit; font-weight: 600; cursor: pointer; text-decoration: none; }
+  button:disabled, .button.disabled { opacity: .45; cursor: default; pointer-events: none; }
+  button.secondary { background: var(--bar-bg); color: var(--text); }
+  .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .error { color: var(--danger); font-size: 13px; min-height: 1em; margin-top: 8px; }
+  .check { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+  .check label { margin: 0; color: var(--text); font-size: 14px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; }
+  .tile { background: var(--bg); border-radius: 6px; padding: 8px 10px; }
+  .tile b { display: block; font-size: 18px; }
+  .bars { margin-top: 12px; display: grid; gap: 5px; }
+  .bar { display: grid; grid-template-columns: 52px 1fr 52px; gap: 8px; align-items: center; font-variant-numeric: tabular-nums; }
+  .bar div { height: 10px; background: var(--bar-bg); border-radius: 5px; overflow: hidden; }
+  .bar span { display: block; height: 100%; background: var(--bar); }
+  svg { width: 100%; height: auto; display: block; }
+  svg text { fill: var(--muted); font-size: 11px; }
+  .legend { display: flex; gap: 14px; font-size: 13px; color: var(--muted); margin: 4px 0 10px; }
+  .legend i { display: inline-block; width: 12px; height: 3px; vertical-align: middle; margin-right: 5px; }
+  code { background: var(--bg); padding: 2px 5px; border-radius: 4px; word-break: break-all; }
+  ol { padding-left: 20px; margin: 8px 0; }
+  pre { margin: 0; max-height: 220px; overflow: auto; font-size: 12px; white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>2048 Algo training</h1>
+    <span class="pill" id="status">Connecting…</span>
+  </header>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Network</h2>
+      <label for="network">Train and use</label>
+      <select id="network"></select>
+      <div id="new-name-row">
+        <label for="new-name">Name for the new network</label>
+        <input type="text" id="new-name" value="network" spellcheck="false">
+      </div>
+      <p class="muted" id="network-info"></p>
+    </section>
+
+    <section class="card">
+      <h2>Run</h2>
+      <label for="threads">CPU cores: <b id="threads-label"></b></label>
+      <input type="range" id="threads" min="1" value="1">
+      <div class="check">
+        <input type="checkbox" id="optimistic" checked><label for="optimistic">Optimistic start (explores more; slower at first)</label>
+      </div>
+      <div class="check">
+        <input type="checkbox" id="tc" checked><label for="tc">Adaptive learning rates (TC learning, about 1.6 GB of memory)</label>
+      </div>
+      <p class="muted" id="new-only">These two apply when a network is created.</p>
+      <label for="alpha">Step size</label>
+      <input type="number" id="alpha" min="0" max="1" step="any" placeholder="Automatic">
+      <label for="restart">Share of games restarted from late-game boards</label>
+      <input type="number" id="restart" min="0" max="0.9" step="0.1" value="0.5">
+      <div class="buttons">
+        <button id="start">Start training</button>
+        <button id="stop" class="secondary">Stop and save</button>
+        <button id="save" class="secondary">Save now</button>
+      </div>
+      <div class="error" id="error"></div>
+    </section>
+
+    <section class="card wide">
+      <h2>Progress</h2>
+      <div id="progress"></div>
+    </section>
+
+    <section class="card wide">
+      <h2>History of <span id="history-name"></span></h2>
+      <div class="legend"><span><i style="background: var(--series-1)"></i>Average score of new games</span></div>
+      <svg id="chart-score" viewBox="0 0 640 180" role="img" aria-label="Average score over games trained"></svg>
+      <div class="legend">
+        <span><i style="background: var(--series-1)"></i>Reach 16384</span>
+        <span><i style="background: var(--series-2)"></i>Reach 32768</span>
+      </div>
+      <svg id="chart-reach" viewBox="0 0 640 180" role="img" aria-label="Share of new games reaching 16384 and 32768"></svg>
+      <p class="muted">New games are the training games that start from an empty board. They look one move ahead, so the panel's Learned search, which looks 4 or 5 moves ahead, plays noticeably stronger with the same weights.</p>
+    </section>
+
+    <section class="card">
+      <h2>Use on 2048.org</h2>
+      <div class="buttons" style="margin-top: 0">
+        <a class="button" id="download" href="#">Download weights</a>
+        <button class="secondary" id="copy-path">Copy file path</button>
+      </div>
+      <p class="muted" id="download-note"></p>
+      <ol>
+        <li>Open <b>2048.org</b> with the 2048 Algo userscript installed (<a href="/2048-algo.user.js">install or update it</a>).</li>
+        <li>In the panel, press <b>Load weights</b> and pick the downloaded file, or the file at the path above.</li>
+        <li>Choose <b>Learned</b> or <b>Learned (deep)</b> and press <b>Start</b>.</li>
+      </ol>
+    </section>
+
+    <section class="card">
+      <h2>Log</h2>
+      <pre id="log"></pre>
+    </section>
+  </div>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const NEW = '__new__';
+  let state = null;
+  let selected = null;
+  let historyName = null;
+  let historyFetched = 0;
+
+  const fmt = (n) => Math.round(n).toLocaleString();
+  const pct = (x) => `${(x * 100).toFixed(x < 0.1 ? 1 : 0)}%`;
+  const hours = (s) => (s >= 3600 ? `${(s / 3600).toFixed(1)} h` : `${Math.round(s / 60)} min`);
+  const size = (b) => (b >= 2 ** 30 ? `${(b / 2 ** 30).toFixed(1)} GB` : `${Math.round(b / 2 ** 20)} MB`);
+
+  async function api(path, body) {
+    const res = await fetch(path, body === undefined ? {} : {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    return data;
+  }
+
+  function currentName() {
+    if (state && state.training) return state.training.name;
+    return selected === NEW ? $('new-name').value.trim() : selected;
+  }
+
+  function network(name) {
+    return state && state.networks.find((n) => n.name === name);
+  }
+
+  function renderNetworks() {
+    const select = $('network');
+    const names = state.networks.map((n) => n.name);
+    if (state.training) selected = state.training.name;
+    if (selected === null) selected = names[0] || NEW;
+    if (selected !== NEW && !names.includes(selected)) selected = names[0] || NEW;
+    const options = state.networks.map((n) => `<option value="${n.name}">${n.name}${n.valid ? '' : ' (not a weights file)'}</option>`).join('') +
+      `<option value="${NEW}">New network…</option>`;
+    if (select.dataset.options !== options) {
+      select.innerHTML = options;
+      select.dataset.options = options;
+    }
+    select.value = selected;
+    select.disabled = Boolean(state.training);
+    $('new-name-row').hidden = selected !== NEW || Boolean(state.training);
+
+    const n = network(selected);
+    $('network-info').textContent = selected === NEW
+      ? 'A new network.'
+      : !n.valid ? 'Not a weights file this version can use (two-stage files from versions 1.4-1.5 are not supported).'
+      : `${n.tc ? 'Adaptive rates (TC)' : 'Fixed rate'} · ` +
+        `${fmt(n.games)} games · ${hours(n.seconds || 0)} trained · ${size(n.bytes)} on disk · saved ${new Date(n.updated).toLocaleString()}`;
+
+    // Both are chosen when a network is created; existing ones keep theirs.
+    const creating = selected === NEW && !state.training;
+    $('tc').disabled = $('optimistic').disabled = !creating;
+    if (selected !== NEW && n) $('tc').checked = n.tc;
+  }
+
+  function renderControls() {
+    const threads = $('threads');
+    threads.max = state.cores;
+    if (!threads.dataset.ready) {
+      threads.value = state.cores;
+      threads.dataset.ready = '1';
+    }
+    if (state.training) threads.value = state.training.threads;
+    threads.disabled = Boolean(state.training);
+    const t = Number(threads.value);
+    $('threads-label').textContent = t === 1 ? '1 (one at a time)' : `${t} of ${state.cores} in parallel`;
+    $('alpha').disabled = $('restart').disabled = Boolean(state.training);
+    $('start').disabled = Boolean(state.training);
+    $('stop').disabled = $('save').disabled = !state.training;
+    const status = $('status');
+    status.textContent = state.training ? `Training ${state.training.name} on ${state.training.threads} cores` : 'Idle';
+    status.className = state.training ? 'pill on' : 'pill';
+    if (state.error) $('error').textContent = state.error;
+  }
+
+  function renderProgress() {
+    const t = state.training;
+    if (!t) {
+      $('progress').innerHTML = '<p class="muted">Not training. Pick a network and press Start training.</p>';
+      return;
+    }
+    const s = t.summary;
+    const bars = Object.entries(s.reach).map(([tile, rate]) =>
+      `<div class="bar"><b>${tile}</b><div><span style="width:${(rate * 100).toFixed(1)}%"></span></div><span>${pct(rate)}</span></div>`).join('');
+    const restarts = Object.entries(s.restarts).map(([tile, rate]) => `${tile} → ${tile * 2}: ${pct(rate)}`).join(' · ');
+    $('progress').innerHTML = `
+      <div class="tiles">
+        <div class="tile">Games trained<b>${fmt(s.games)}</b></div>
+        <div class="tile">Games / s<b>${fmt(s.gamesPerSecond)}</b></div>
+        <div class="tile">Moves / s<b>${(s.movesPerSecond / 1e6).toFixed(2)}M</b></div>
+        <div class="tile">This session<b>${hours(s.elapsed)}</b></div>
+        <div class="tile">New games avg score<b>${fmt(s.avg)}</b></div>
+      </div>
+      <p class="muted" style="margin: 12px 0 0">Share of the last ${fmt(s.newGames)} new games reaching each tile:</p>
+      <div class="bars">${bars}</div>
+      <p class="muted">${restarts ? `Games restarted from a late-game board that made the next tile: ${restarts}` : 'Late-game restarts begin once games reach 8192.'}
+        ${t.tc ? 'Adaptive rates' : `Fixed rate ${t.alpha}`} · restart share ${t.restart} · autosaves every 10 minutes.</p>`;
+  }
+
+  function renderUse() {
+    const name = currentName();
+    const n = network(name);
+    const link = $('download');
+    link.href = n ? `/weights/${name}.bin` : '#';
+    link.classList.toggle('disabled', !n);
+    $('copy-path').disabled = !n;
+    $('download-note').innerHTML = n
+      ? `<code>${state.dir}\\${name}.bin</code><br>${state.training ? 'While training, this is the last save; press Save now first to get the latest.' : ''}`
+      : 'Train a network first; its weights appear here after the first save.';
+    $('log').textContent = state.lines.join('\n');
+  }
+
+  function chart(svg, series, format, yMax) {
+    const W = 640, H = 180, L = 56, R = 10, T = 10, B = 24;
+    const all = series.flatMap((s) => s.points);
+    if (all.length < 2) {
+      svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle">History appears after a few reports (every 30 seconds while training).</text>`;
+      return;
+    }
+    const xMin = Math.min(...all.map((p) => p[0])), xMax = Math.max(...all.map((p) => p[0]));
+    const top = yMax || Math.max(...all.map((p) => p[1])) * 1.1 || 1;
+    const x = (v) => L + ((v - xMin) / (xMax - xMin || 1)) * (W - L - R);
+    const y = (v) => H - B - (v / top) * (H - T - B);
+    let out = '';
+    for (let i = 0; i <= 4; i++) {
+      const v = (top * i) / 4;
+      out += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${format(v)}</text>`;
+    }
+    out += `<text x="${L}" y="${H - 6}">${fmt(xMin)} games</text><text x="${W - R}" y="${H - 6}" text-anchor="end">${fmt(xMax)} games</text>`;
+    for (const s of series) {
+      const pts = s.points.map((p) => `${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ');
+      out += `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round"/>`;
+    }
+    svg.innerHTML = out;
+  }
+
+  async function renderHistory(force) {
+    const name = currentName();
+    $('history-name').textContent = name || 'a new network';
+    if (!network(name)) {
+      chart($('chart-score'), [], fmt);
+      chart($('chart-reach'), [], pct);
+      return;
+    }
+    if (!force && name === historyName && Date.now() - historyFetched < 30000) return;
+    historyName = name;
+    historyFetched = Date.now();
+    const points = (await api(`/api/history?name=${encodeURIComponent(name)}`)).filter((p) => p.newGames);
+    chart($('chart-score'), [{ color: 'var(--series-1)', points: points.map((p) => [p.games, p.avg]) }], (v) => `${Math.round(v / 1000)}k`);
+    chart($('chart-reach'), [
+      { color: 'var(--series-1)', points: points.map((p) => [p.games, p.reach[16384]]) },
+      { color: 'var(--series-2)', points: points.map((p) => [p.games, p.reach[32768]]) },
+    ], pct);
+  }
+
+  async function refresh() {
+    try {
+      state = await api('/api/state');
+      renderNetworks();
+      renderControls();
+      renderProgress();
+      renderUse();
+      await renderHistory(false);
+    } catch (err) {
+      $('status').textContent = 'Dashboard not running';
+      $('status').className = 'pill';
+    }
+  }
+
+  async function act(path, body, button, busyText) {
+    const label = button.textContent;
+    button.textContent = busyText;
+    button.disabled = true;
+    $('error').textContent = '';
+    try {
+      state = await api(path, body);
+      renderNetworks();
+      renderControls();
+      renderProgress();
+      renderUse();
+      await renderHistory(true);
+    } catch (err) {
+      $('error').textContent = err.message;
+    } finally {
+      button.textContent = label;
+      if (state) renderControls();
+    }
+  }
+
+  $('network').addEventListener('change', (e) => {
+    selected = e.target.value;
+    renderNetworks();
+    renderUse();
+    renderHistory(true);
+  });
+  $('new-name').addEventListener('input', () => renderUse());
+  $('threads').addEventListener('input', () => renderControls());
+  $('start').addEventListener('click', (e) => act('/api/start', {
+    name: currentName(),
+    threads: Number($('threads').value),
+    tc: $('tc').checked,
+    optimistic: $('optimistic').checked,
+    alpha: $('alpha').value,
+    restart: Number($('restart').value),
+  }, e.target, 'Starting…'));
+  $('stop').addEventListener('click', (e) => act('/api/stop', {}, e.target, 'Saving…'));
+  $('save').addEventListener('click', (e) => act('/api/save', {}, e.target, 'Saving…'));
+  $('copy-path').addEventListener('click', async (e) => {
+    const name = currentName();
+    try {
+      await navigator.clipboard.writeText(`${state.dir}\\${name}.bin`);
+      e.target.textContent = 'Copied';
+    } catch (err) {
+      e.target.textContent = 'Copy failed';
+    }
+    setTimeout(() => { e.target.textContent = 'Copy file path'; }, 1500);
+  });
+
+  refresh();
+  setInterval(refresh, 2000);
+</script>
+</body>
+</html>

@@ -7,5 +7,6 @@ __pycache__/
 .env.*
 !.env.example
 
-# Trained networks (268 MB each) and their logs
-weights/
+# Keep training state, logs, and older networks local
+weights/*
+!weights/alpha-single.bin

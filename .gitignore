@@ -9,4 +9,6 @@ __pycache__/
 
 # Keep training state, logs, and older networks local
 weights/*
-!weights/alpha-single.bin
+
+# Notes and plans stay local; the README is the only published documentation
+docs/

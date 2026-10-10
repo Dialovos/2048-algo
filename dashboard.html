@@ -72,19 +72,40 @@
       <div id="new-name-row">
         <label for="new-name">Name for the new network</label>
         <input type="text" id="new-name" value="network" spellcheck="false">
+        <label for="layout">Size</label>
+        <select id="layout">
+          <option value="standard">Standard: 4 patterns (268 MB; CPU or GPU)</option>
+          <option value="large">Large: 8 patterns × 3 stages, up to 32768 (1.6 GB; GPU only)</option>
+          <option value="xlarge">Extra large: 8 patterns × 5 stages, up to 65536 (2.7 GB; GPU only)</option>
+        </select>
+        <div id="from-row" hidden>
+          <label for="from">Start from</label>
+          <select id="from"></select>
+          <p class="muted">Each stage starts as a copy of that network's weights for the same boards, so it plays as well from the first game. Stages it already has keep their learning rates; new stages start at full rates, and late-game restarts favor them.</p>
+        </div>
       </div>
       <p class="muted" id="network-info"></p>
     </section>
 
     <section class="card">
       <h2>Run</h2>
+      <label for="backend">Training device</label>
+      <select id="backend"><option value="cpu">CPU</option><option value="gpu" disabled>NVIDIA GPU</option></select>
+      <p class="muted" id="gpu-info">Checking NVIDIA GPU…</p>
+      <div id="cpu-controls">
       <label for="threads">CPU cores: <b id="threads-label"></b></label>
       <input type="range" id="threads" min="1" value="1">
+      </div>
+      <div id="gpu-controls" hidden>
+        <label for="gpu-games">Games running in parallel</label>
+        <select id="gpu-games"><option>256</option><option>512</option><option selected>1024</option><option>2048</option><option>4096</option></select>
+      </div>
+      <p class="muted">To switch devices, stop and save, select the other device, then start the same network.</p>
       <div class="check">
         <input type="checkbox" id="optimistic" checked><label for="optimistic">Optimistic start (explores more; slower at first)</label>
       </div>
       <div class="check">
-        <input type="checkbox" id="tc" checked><label for="tc">Adaptive learning rates (TC learning, about 1.6 GB of memory)</label>
+        <input type="checkbox" id="tc" checked><label for="tc">Adaptive learning rates (TC learning)</label>
       </div>
       <p class="muted" id="new-only">These two apply when a network is created.</p>
       <label for="alpha">Step size</label>
@@ -173,8 +194,9 @@
     const names = state.networks.map((n) => n.name);
     if (state.training) selected = state.training.name;
     if (selected === null) selected = names[0] || NEW;
-    if (selected !== NEW && !names.includes(selected)) selected = names[0] || NEW;
+    if (!state.training && selected !== NEW && !names.includes(selected)) selected = names[0] || NEW;
     const options = state.networks.map((n) => `<option value="${n.name}">${n.name}${n.valid ? '' : ' (not a weights file)'}</option>`).join('') +
+      (state.training && !names.includes(state.training.name) ? `<option value="${state.training.name}">${state.training.name} (training)</option>` : '') +
       `<option value="${NEW}">New network…</option>`;
     if (select.dataset.options !== options) {
       select.innerHTML = options;
@@ -185,11 +207,26 @@
     $('new-name-row').hidden = selected !== NEW || Boolean(state.training);
 
     const n = network(selected);
-    $('network-info').textContent = selected === NEW
-      ? 'A new network.'
+    const STAGES = { standard: 1, large: 3, xlarge: 5 };
+    const target = $('layout').value, large = target !== 'standard';
+    $('from-row').hidden = !large;
+    const sources = state.networks.filter((net) => net.layout && STAGES[net.layout] < STAGES[target]);
+    const fromOptions = '<option value="">Nothing: a new network</option>' +
+      sources.map((net) => `<option value="${net.name}">${net.name}</option>`).join('');
+    if ($('from').dataset.options !== fromOptions) {
+      const previous = $('from').value, chosen = Boolean($('from').dataset.options);
+      $('from').innerHTML = fromOptions;
+      $('from').dataset.options = fromOptions;
+      // Keep the choice (including "Nothing") if it still fits; otherwise suggest the newest smaller network.
+      const keep = (chosen && previous === '') || sources.some((net) => net.name === previous);
+      $('from').value = keep ? previous : sources.length ? sources[0].name : '';
+    }
+    $('network-info').textContent = selected === NEW || !n
+      ? (large ? 'A new large network. It trains only on the NVIDIA GPU; the 2048.org panel plays it on the CPU (16 GB of memory recommended for extra large).' : 'A new network.')
       : !n.valid ? 'Not a weights file this version can use (two-stage files from versions 1.4-1.5 are not supported).'
-      : `${n.tc ? 'Adaptive rates (TC)' : 'Fixed rate'} · ` +
-        `${fmt(n.games)} games · ${hours(n.seconds || 0)} trained · ${size(n.bytes)} on disk · saved ${new Date(n.updated).toLocaleString()}`;
+      : `${{ standard: 'Standard', large: 'Large (8 patterns × 3 stages; GPU training)', xlarge: 'Extra large (8 patterns × 5 stages; GPU training)' }[n.layout]} · ${n.tc ? 'Adaptive rates (TC)' : 'Fixed rate'} · ` +
+        `${fmt(n.games)} games · ${hours(n.seconds || 0)} trained · ${size(n.bytes)} on disk · saved ${new Date(n.updated).toLocaleString()}` +
+        (n.tc ? '' : ' · No adaptive-rate state: continuing uses a fixed learning rate.');
 
     // Both are chosen when a network is created; existing ones keep theirs.
     const creating = selected === NEW && !state.training;
@@ -198,21 +235,33 @@
   }
 
   function renderControls() {
+    const backend = $('backend');
+    backend.querySelector('[value="gpu"]').disabled = !state.gpu.available;
+    backend.disabled = Boolean(state.training);
+    if (state.training) backend.value = state.training.backend || 'cpu';
+    const isGpu = backend.value === 'gpu';
+    $('cpu-controls').hidden = isGpu;
+    $('gpu-controls').hidden = !isGpu;
+    $('gpu-games').disabled = Boolean(state.training);
+    if (state.training && isGpu) $('gpu-games').value = state.training.gpuGames;
+    $('gpu-info').textContent = state.gpu.available
+      ? `${state.gpu.name} · ${size(state.gpu.totalBytes)} GPU memory`
+      : state.gpu.reason;
     const threads = $('threads');
     threads.max = state.cores;
     if (!threads.dataset.ready) {
       threads.value = state.cores;
       threads.dataset.ready = '1';
     }
-    if (state.training) threads.value = state.training.threads;
+    if (state.training && !isGpu) threads.value = state.training.threads;
     threads.disabled = Boolean(state.training);
     const t = Number(threads.value);
     $('threads-label').textContent = t === 1 ? '1 (one at a time)' : `${t} of ${state.cores} in parallel`;
     $('alpha').disabled = $('restart').disabled = Boolean(state.training);
-    $('start').disabled = Boolean(state.training);
+    $('start').disabled = Boolean(state.training) || (isGpu && !state.gpu.available);
     $('stop').disabled = $('save').disabled = !state.training;
     const status = $('status');
-    status.textContent = state.training ? `Training ${state.training.name} on ${state.training.threads} cores` : 'Idle';
+    status.textContent = state.training ? `${state.training.status === 'starting' ? 'Starting' : state.training.status === 'stopping' ? 'Saving' : 'Training'} ${state.training.name} on ${isGpu ? 'NVIDIA GPU' : `${state.training.threads} CPU cores`}` : 'Idle';
     status.className = state.training ? 'pill on' : 'pill';
     if (state.error) $('error').textContent = state.error;
   }
@@ -226,7 +275,8 @@
     const s = t.summary;
     const bars = Object.entries(s.reach).map(([tile, rate]) =>
       `<div class="bar"><b>${tile}</b><div><span style="width:${(rate * 100).toFixed(1)}%"></span></div><span>${pct(rate)}</span></div>`).join('');
-    const restarts = Object.entries(s.restarts).map(([tile, rate]) => `${tile} → ${tile * 2}: ${pct(rate)}`).join(' · ');
+    // Keys name the starting tiles ("16384+8192" for stage 3); the target doubles the first.
+    const restarts = Object.entries(s.restarts).map(([tile, rate]) => `${tile} → ${2 * parseInt(tile, 10)}: ${pct(rate)}`).join(' · ');
     $('progress').innerHTML = `
       <div class="tiles">
         <div class="tile">Games trained<b>${fmt(s.games)}</b></div>
@@ -238,7 +288,7 @@
       <p class="muted" style="margin: 12px 0 0">Share of the last ${fmt(s.newGames)} new games reaching each tile:</p>
       <div class="bars">${bars}</div>
       <p class="muted">${restarts ? `Games restarted from a late-game board that made the next tile: ${restarts}` : 'Late-game restarts begin once games reach 8192.'}
-        ${t.tc ? 'Adaptive rates' : `Fixed rate ${t.alpha}`} · restart share ${t.restart} · autosaves every 10 minutes.</p>`;
+        ${t.layout !== 'standard' ? `${t.layout === 'xlarge' ? 'Extra large' : 'Large'} network · ` : ''}${t.tc ? 'Adaptive rates' : `Fixed rate ${t.alpha}`} · restart share ${t.restart} · autosaves every 10 minutes.</p>`;
   }
 
   function renderUse() {
@@ -338,21 +388,27 @@
     renderHistory(true);
   });
   $('new-name').addEventListener('input', () => renderUse());
+  $('layout').addEventListener('change', () => renderNetworks());
   $('threads').addEventListener('input', () => renderControls());
+  $('backend').addEventListener('change', () => renderControls());
   $('start').addEventListener('click', (e) => act('/api/start', {
     name: currentName(),
     threads: Number($('threads').value),
+    backend: $('backend').value,
+    gpuGames: Number($('gpu-games').value),
     tc: $('tc').checked,
     optimistic: $('optimistic').checked,
     alpha: $('alpha').value,
     restart: Number($('restart').value),
+    layout: selected === NEW ? $('layout').value : 'standard',
+    from: selected === NEW && $('layout').value !== 'standard' ? $('from').value : '',
   }, e.target, 'Starting…'));
   $('stop').addEventListener('click', (e) => act('/api/stop', {}, e.target, 'Saving…'));
   $('save').addEventListener('click', (e) => act('/api/save', {}, e.target, 'Saving…'));
   $('copy-path').addEventListener('click', async (e) => {
     const name = currentName();
     try {
-      await navigator.clipboard.writeText(`${state.dir}\\${name}.bin`);
+      await navigator.clipboard.writeText(`${state.dir}${state.pathSeparator}${name}.bin`);
       e.target.textContent = 'Copied';
     } catch (err) {
       e.target.textContent = 'Copy failed';

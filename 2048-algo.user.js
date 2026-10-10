@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         2048 Algo
 // @namespace    2048-algo
-// @version      1.6.0
+// @version      1.8.0
 // @description  Plays 2048.org with an expectimax search, using a hand-tuned heuristic or a trained n-tuple network. Adds a control panel to the game page.
 // @match        https://2048.org/*
 // @match        https://*.2048.org/*
@@ -28,17 +28,37 @@
   const UP = 0, RIGHT = 1, DOWN = 2, LEFT = 3;
   const DIR_NAMES = ['up', 'right', 'down', 'left'];
 
-  // Learned evaluation: four 6-cell patterns (cells numbered 0-15, row by
-  // row), each with 16^6 float32 weights. Changing these breaks saved weights.
-  const NETWORK_TUPLES = [[0, 1, 2, 3, 4, 5], [4, 5, 6, 7, 8, 9], [0, 1, 2, 4, 5, 6], [4, 5, 6, 8, 9, 10]];
-  const FEATURE_COUNT = NETWORK_TUPLES.length * 8; // each pattern in 8 rotations/reflections
-  const NETWORK_WEIGHTS = NETWORK_TUPLES.length << 24;
+  // Learned evaluation: 6-cell patterns (cells numbered 0-15, row by row),
+  // each with 16^6 float32 weights. Changing these breaks saved weights. A
+  // standard network uses the first four in one stage. Large and extra-large
+  // networks (GPU training only) use all eight in each of 3 or 5 stages and
+  // add a corner bonus; see "Learned evaluation" in createEngine. Files
+  // differ in size, stage after stage.
+  const NETWORK_TUPLES = [[0, 1, 2, 3, 4, 5], [4, 5, 6, 7, 8, 9], [0, 1, 2, 4, 5, 6], [4, 5, 6, 8, 9, 10],
+    [0, 1, 2, 3, 4, 8], [0, 1, 2, 4, 5, 8], [0, 1, 4, 5, 6, 7], [0, 1, 2, 5, 6, 7]];
+  const NETWORK_LAYOUTS = {
+    standard: { patterns: 4, stages: 1 },
+    large: { patterns: 8, stages: 3 }, // stages up to 32768
+    xlarge: { patterns: 8, stages: 5 }, // two more for 65536
+  };
+  const FEATURE_COUNT = 4 * 8; // standard: each pattern in 8 rotations/reflections
+  const NETWORK_WEIGHTS = 4 << 24;
+  const LARGE_NETWORK_WEIGHTS = (3 * 8) << 24;
+  const XLARGE_NETWORK_WEIGHTS = (5 * 8) << 24;
   // New networks start every position at this many points (optimistic
   // initialization): positions training hasn't seen yet look good, so it explores them.
   const OPTIMISTIC_VALUE = 320000;
 
+  // 'standard', 'large', 'xlarge', or null for a weights length.
+  function networkLayout(length) {
+    return Object.keys(NETWORK_LAYOUTS).find((name) => {
+      const { patterns, stages } = NETWORK_LAYOUTS[name];
+      return length === (stages * patterns) << 24;
+    }) || null;
+  }
+
   function isNetworkSize(length) {
-    return length === NETWORK_WEIGHTS;
+    return networkLayout(length) !== null;
   }
 
   // Patterns holding 16384 or more only occur late in rare games, so their
@@ -46,7 +66,7 @@
   // untried ones from pulling the big tile toward whichever cells appear in
   // the most patterns (the middle), which wrecks the late game.
   function clearLateEntries(weights) {
-    for (let t = 0; t < NETWORK_TUPLES.length; t++) {
+    for (let t = 0; t < weights.length >> 24; t++) {
       const base = t << 24;
       for (let i = 0; i < 1 << 24; i++) {
         // Some cell of the pattern (4 bits each) holds rank 14 or 15: bits 1-3 of that nibble all set.
@@ -68,7 +88,7 @@
       depthBias: 0, maxDepth: 20, // heuristic search depth
       searchDepth: 3, // learned search: moves looked ahead, 1 = greedy
       cacheBits: 20,
-      weights: null, // Float32Array(NETWORK_WEIGHTS)
+      weights: null, // see setWeights
       tc: null, // { e, a }: Float32Arrays the size of weights, for TC learning (train.js)
     }, options);
 
@@ -272,11 +292,19 @@
     // ---- Learned evaluation ------------------------------------------------
     // The network estimates the points still to come from an afterstate (the
     // board after a move, before the new tile). Each pattern is read in all 8
-    // rotations and reflections, giving 32 weight lookups per board. Ranks
-    // are capped at 15 inside the network, so tiles from 32768 up look alike to it.
+    // rotations and reflections: 32 weight lookups per board in a standard
+    // network, 64 in a large one. Ranks are capped at 15 inside the network,
+    // so tiles from 32768 up look alike to it.
+    //
+    // Large networks keep a separate set of weights for each stage of the
+    // game: before 16384, then two stages for each big-tile level: holding
+    // 16384 (and in extra-large networks, 32768) with no other tile of 8192
+    // or more, and with one (building the next big tile). A large network has
+    // one level, so it treats 32768 boards like 16384 ones; an extra-large
+    // network has two. Both add a corner bonus to every value (potential below).
 
-    const FEATURES = FEATURE_COUNT;
-    const featureCells = new Int32Array(FEATURES * 6);
+    let FEATURES = FEATURE_COUNT, levels = 0;
+    const featureCells = new Int32Array(NETWORK_TUPLES.length * 8 * 6);
     {
       let f = 0;
       for (const tuple of NETWORK_TUPLES) {
@@ -294,8 +322,10 @@
     }
     const NET_RANK = new Int32Array(32).map((_, rank) => Math.min(rank, 15));
     const cells = new Int32Array(16);
-    const featureIndex = new Int32Array(FEATURES);
-    let W = null, TCE = null, TCA = null;
+    const featureIndex = new Int32Array(NETWORK_TUPLES.length * 8);
+    // Weights and TC accumulators, one array per stage; W, TCE and TCA are the
+    // current board's stage (set by indexFeatures).
+    let stageW = null, stageE = null, stageA = null, W = null, TCE = null, TCA = null;
 
     // Fills featureIndex with each feature's weight index for this board.
     function indexFeatures(a, b, c, d) {
@@ -304,6 +334,20 @@
         cells[4 + i] = NET_RANK[(b >> s) & 31];
         cells[8 + i] = NET_RANK[(c >> s) & 31];
         cells[12 + i] = NET_RANK[(d >> s) & 31];
+      }
+      let stage = 0;
+      if (levels) {
+        let top = 0, big = 0;
+        for (let i = 0; i < 16; i++) {
+          if (cells[i] > top) top = cells[i];
+          if (cells[i] >= 13) big++;
+        }
+        if (top >= 14) stage = 1 + 2 * (Math.min(top, 13 + levels) - 14) + (big >= 2 ? 1 : 0);
+      }
+      W = stageW[stage];
+      if (stageE) {
+        TCE = stageE[stage];
+        TCA = stageA[stage];
       }
       for (let f = 0, p = 0; f < FEATURES; f++, p += 6) {
         featureIndex[f] = ((f >> 3) << 24) | cells[featureCells[p]] | (cells[featureCells[p + 1]] << 4) |
@@ -318,9 +362,33 @@
       return v;
     }
 
+    // Large layouts: the biggest tile's value when it sits in a corner, plus
+    // half the bigger of that corner's two edge neighbours; 0 otherwise.
+    // Training learns the value minus this bonus (potential-based reward
+    // shaping), so the best moves by final score don't change, but a move that
+    // pulls the big tile out of its corner costs points at once instead of
+    // only many moves later, and search keeps the bonus in rare positions the
+    // weights haven't learned.
+    const CORNER_CELLS = [0, 1, 4, 3, 2, 7, 12, 13, 8, 15, 14, 11]; // corner, then its edge neighbours
+    function rankAt(a, b, c, d, cell) {
+      return ((cell < 4 ? a : cell < 8 ? b : cell < 12 ? c : d) >> (5 * (cell & 3))) & 31;
+    }
+    function potential(a, b, c, d) {
+      if (!levels) return 0;
+      let top = 0;
+      for (let s = 0; s < 20; s += 5) top = Math.max(top, (a >> s) & 31, (b >> s) & 31, (c >> s) & 31, (d >> s) & 31);
+      let bonus = 0;
+      for (let k = 0; k < 12; k += 3) {
+        if (rankAt(a, b, c, d, CORNER_CELLS[k]) !== top) continue;
+        const next = Math.max(rankAt(a, b, c, d, CORNER_CELLS[k + 1]), rankAt(a, b, c, d, CORNER_CELLS[k + 2]));
+        bonus = Math.max(bonus, 2 ** top + (next ? 2 ** next / 2 : 0));
+      }
+      return bonus;
+    }
+
     function netValue(a, b, c, d) {
       indexFeatures(a, b, c, d);
-      return indexedValue();
+      return indexedValue() + potential(a, b, c, d);
     }
 
     // For choosing moves: a weight still at its optimistic starting value has
@@ -334,7 +402,7 @@
         const w = W[featureIndex[f]];
         if (w !== UNTRAINED) v += w;
       }
-      return v;
+      return v + potential(a, b, c, d);
     }
 
     // One learning step: move this afterstate's value toward `target`; returns
@@ -343,7 +411,8 @@
     // as its errors stop agreeing in sign (temporal coherence learning).
     function netLearn(a, b, c, d, target, alpha) {
       indexFeatures(a, b, c, d);
-      const error = target - indexedValue();
+      const bonus = potential(a, b, c, d);
+      const error = target - (indexedValue() + bonus);
       const step = alpha * error / FEATURES;
       if (TCE) {
         const size = Math.abs(error);
@@ -356,7 +425,7 @@
       } else {
         for (let f = 0; f < FEATURES; f++) W[featureIndex[f]] += step;
       }
-      return indexedValue();
+      return indexedValue() + bonus;
     }
 
     // Like chanceNode, but leaves are network values and `depth` counts down.
@@ -553,17 +622,31 @@
       return heuristic(a, b, c, d);
     }
 
-    // Afterstate value from the network (points still to come).
+    // Afterstate value from the network (points still to come, with any corner bonus).
     function value(grid) {
       const [a, b, c, d] = toRows(grid);
       return netValue(a, b, c, d);
     }
 
+    // weights (and tc.e, tc.a) are one Float32Array for the whole network or
+    // one per stage; browsers and Node can't hold a 2.7 GB network in one array.
     function setWeights(weights, tc) {
-      if (!isNetworkSize(weights.length)) throw new Error('Wrong weights size');
-      W = weights;
-      TCE = tc ? tc.e : null;
-      TCA = tc ? tc.a : null;
+      const parts = Array.isArray(weights) ? weights : [weights];
+      const layout = networkLayout(parts.reduce((n, part) => n + part.length, 0));
+      if (!layout) throw new Error('Wrong weights size');
+      const { patterns, stages } = NETWORK_LAYOUTS[layout], size = patterns << 24;
+      const split = (list) => {
+        if (list.length === stages && list.every((part) => part.length === size)) return list;
+        if (list.length !== 1) throw new Error('Wrong weights size');
+        return Array.from({ length: stages }, (_, s) => list[0].subarray(s * size, (s + 1) * size));
+      };
+      levels = (stages - 1) / 2;
+      FEATURES = patterns * 8;
+      stageW = split(parts);
+      stageE = tc ? split(Array.isArray(tc.e) ? tc.e : [tc.e]) : null;
+      stageA = tc ? split(Array.isArray(tc.a) ? tc.a : [tc.a]) : null;
+      W = stageW[0];
+      TCE = TCA = null;
     }
     if (opts.weights) setWeights(opts.weights, opts.tc);
 
@@ -600,6 +683,19 @@
       },
     };
     return selfPlay;
+  }
+
+  // A weights file or stored blob as the engine takes it: one Float32Array for
+  // a standard network, one per stage for larger ones (a browser can't hold
+  // 2.7 GB in one array). Reads one stage at a time.
+  async function readWeights(blob) {
+    const layout = blob.size % 4 ? null : networkLayout(blob.size / 4);
+    if (!layout) throw new Error('Not a weights file');
+    const { patterns, stages } = NETWORK_LAYOUTS[layout];
+    if (stages === 1) return new Float32Array(await blob.arrayBuffer());
+    const bytes = (patterns << 24) * 4, parts = [];
+    for (let s = 0; s < stages; s++) parts.push(new Float32Array(await blob.slice(s * bytes, (s + 1) * bytes).arrayBuffer()));
+    return parts;
   }
 
   // One IndexedDB request against this site's 'algo2048' store (page or worker).
@@ -712,7 +808,10 @@
       `const UP = ${UP}, RIGHT = ${RIGHT}, DOWN = ${DOWN}, LEFT = ${LEFT};`,
       `const NETWORK_TUPLES = ${JSON.stringify(NETWORK_TUPLES)};`,
       `const FEATURE_COUNT = ${FEATURE_COUNT};`,
-      `const NETWORK_WEIGHTS = ${NETWORK_WEIGHTS}, OPTIMISTIC_VALUE = ${OPTIMISTIC_VALUE};`,
+      `const NETWORK_LAYOUTS = ${JSON.stringify(NETWORK_LAYOUTS)};`,
+      `const NETWORK_WEIGHTS = ${NETWORK_WEIGHTS};`,
+      `const OPTIMISTIC_VALUE = ${OPTIMISTIC_VALUE};`,
+      networkLayout.toString(),
       isNetworkSize.toString(),
       createEngine.toString(),
       createSelfPlay.toString(),
@@ -758,7 +857,7 @@
         render({ status: 'Loading weights…' });
         try {
           const blob = await idb('readonly', (store) => store.get('weights'));
-          if (blob && isNetworkSize(blob.size / 4)) weights = new Float32Array(await blob.arrayBuffer());
+          if (blob && isNetworkSize(blob.size / 4)) weights = await readWeights(blob);
         } catch (e) {
           weights = null;
         }
@@ -983,13 +1082,17 @@
       try {
         if (!weights) {
           const blob = await idb('readonly', (store) => store.get('weights'));
-          if (blob && isNetworkSize(blob.size / 4)) weights = new Float32Array(await blob.arrayBuffer());
+          if (blob && isNetworkSize(blob.size / 4)) weights = await readWeights(blob);
         }
         totals = (await idb('readonly', (store) => store.get('stats'))) || totals;
       } catch (e) {
         // No browser storage: train from scratch; the first save reports the failure.
       }
       if (!weights) weights = newNetwork();
+      if (Array.isArray(weights)) {
+        render({ training: 'Large networks train in the dashboard on an NVIDIA GPU' });
+        return;
+      }
 
       try {
         trainerUrl = URL.createObjectURL(new Blob([trainingWorkerSource()], { type: 'text/javascript' }));
@@ -1106,11 +1209,11 @@
       fileInput.value = '';
       if (!file || trainer) return;
       if (file.size % 4 || !isNetworkSize(file.size / 4)) {
-        render({ weights: `Not a weights file (needs ${NETWORK_WEIGHTS * 4} bytes)` });
+        render({ weights: `Not a weights file (needs ${[NETWORK_WEIGHTS, LARGE_NETWORK_WEIGHTS, XLARGE_NETWORK_WEIGHTS].map((n) => n * 4).join(', or ')} bytes)` });
         return;
       }
       render({ weights: 'Loading…' });
-      weights = new Float32Array(await file.arrayBuffer());
+      weights = await readWeights(file);
       getEngine().setWeights(weights);
       let note = SAVED;
       try {
@@ -1186,8 +1289,9 @@
 
   if (typeof module === 'object' && module.exports) {
     module.exports = {
-      createEngine, createSelfPlay, trainingWorkerSource, isNetworkSize, clearLateEntries,
-      DIR_NAMES, FEATURE_COUNT, NETWORK_WEIGHTS, OPTIMISTIC_VALUE,
+      createEngine, createSelfPlay, trainingWorkerSource, networkLayout, isNetworkSize, clearLateEntries,
+      DIR_NAMES, FEATURE_COUNT, NETWORK_TUPLES, NETWORK_LAYOUTS, NETWORK_WEIGHTS, LARGE_NETWORK_WEIGHTS,
+      XLARGE_NETWORK_WEIGHTS, OPTIMISTIC_VALUE,
     };
   } else if (typeof document !== 'undefined') {
     installDriver();

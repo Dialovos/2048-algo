@@ -10,7 +10,12 @@
 //   --alpha N             step size (default 1 with TC learning; without it 0.1, dropping to 0.01, 0.001 as progress stalls)
 //   --no-tc               new network without TC learning (fixed rate; uses a third of the memory)
 //   --no-optimistic       new network starting every position at 0 instead of 320000
+//   --layout NAME         new network: standard (default), large (8 patterns x 3 stages plus a
+//                         corner bonus) or xlarge (5 stages, for 65536); large ones train on the GPU only
+//   --from FILE           new network starting from this smaller one (see train-gpu.py)
 //   --threads N           worker threads (default: all CPU cores)
+//   --backend cpu|gpu     training device (default cpu; GPU setup in README)
+//   --gpu-games N         concurrent GPU games (default 1024)
 //   --restart P           share of games started from saved late-game boards (default 0.5)
 //   --save-minutes N      checkpoint interval (default 10)
 //   --report-seconds N    progress interval (default 60)
@@ -22,7 +27,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const {
-  createEngine, createSelfPlay, isNetworkSize, clearLateEntries, FEATURE_COUNT, NETWORK_WEIGHTS, OPTIMISTIC_VALUE,
+  createEngine, createSelfPlay, networkLayout, isNetworkSize, clearLateEntries, FEATURE_COUNT, NETWORK_WEIGHTS, OPTIMISTIC_VALUE,
 } = require('./2048-algo.user.js');
 
 const WINDOW = 10000; // new games in the rolling stats
@@ -32,6 +37,7 @@ const REACH_TILES = [2048, 4096, 8192, 16384, 32768];
 const DEFAULTS = {
   weights: 'weights/network.bin', alpha: NaN, noTc: false, optimistic: OPTIMISTIC_VALUE,
   threads: os.cpus().length, restart: 0.5, saveMinutes: 10, reportSeconds: 60,
+  backend: 'cpu', gpuGames: 1024, layout: 'standard', source: '',
 };
 
 // A network's files, named after its .bin file.
@@ -45,6 +51,8 @@ function networkFiles(bin) {
 // its .history.jsonl for charts.
 function startTraining(options, onLine = () => {}) {
   const o = { ...DEFAULTS, ...options };
+  if (o.backend === 'gpu') return require('./gpu.js').startGpuTraining(o, onLine);
+  if (o.backend !== 'cpu') throw new Error('Backend must be cpu or gpu.');
   const files = networkFiles(o.weights);
   fs.mkdirSync(path.dirname(files.bin), { recursive: true });
   const log = (line) => {
@@ -54,6 +62,9 @@ function startTraining(options, onLine = () => {}) {
 
   const exists = fs.existsSync(files.bin);
   const floats = exists ? fs.statSync(files.bin).size / 4 : NETWORK_WEIGHTS;
+  if (networkLayout(floats) !== 'standard' || (!exists && (o.layout !== 'standard' || o.source))) {
+    throw new Error('Large networks train on the NVIDIA GPU only; the CPU trains standard ones.');
+  }
   if (!isNetworkSize(floats)) throw new Error(`${files.bin} is not a weights file (${NETWORK_WEIGHTS * 4} bytes; two-stage files from versions 1.4-1.5 aren't supported)`);
   const sab = new SharedArrayBuffer(floats * 4);
   const bytes = new Uint8Array(sab);
@@ -87,6 +98,7 @@ function startTraining(options, onLine = () => {}) {
   const restarts = new Map();
 
   let stopped = false;
+  let stopping = null;
   const workers = [];
   for (let i = 0; i < o.threads; i++) {
     const w = new Worker(__filename, { workerData: { sab, tcSab, alpha, restart: o.restart } });
@@ -105,7 +117,7 @@ function startTraining(options, onLine = () => {}) {
     });
     w.on('error', (err) => {
       log(`A training thread failed: ${err.message}`);
-      stop();
+      stop().catch((error) => log(`Save failed: ${error.message}`));
     });
     workers.push(w);
   }
@@ -166,18 +178,23 @@ function startTraining(options, onLine = () => {}) {
 
   // Saves and ends the threads. Safe to call more than once.
   function stop() {
-    if (stopped) return;
-    stopped = true;
+    if (stopping) return stopping;
     timers.forEach(clearInterval);
-    workers.forEach((w) => w.terminate());
-    report();
-    save();
-    log(`Saved ${path.basename(files.bin)}.`);
+    stopping = (async () => {
+      await Promise.all(workers.map((w) => w.terminate()));
+      report();
+      save();
+      log(`Saved ${path.basename(files.bin)}.`);
+      stopped = true;
+    })();
+    return stopping;
   }
 
   return {
+    backend: 'cpu',
     files, useTc, alpha, threads: o.threads, restart: o.restart, startedAt: new Date(startTime).toISOString(),
     summary,
+    get status() { return stopping && !stopped ? 'stopping' : 'training'; },
     save() {
       save();
       log('Saved on request.');
@@ -204,6 +221,7 @@ function listNetworks(dir) {
     return {
       name: f.replace(/\.bin$/, ''),
       valid: isNetworkSize(stat.size / 4),
+      layout: networkLayout(stat.size / 4),
       tc: fs.existsSync(files.tc),
       bytes: stat.size + (fs.existsSync(files.tc) ? fs.statSync(files.tc).size : 0),
       games: totals.games,
@@ -228,6 +246,7 @@ function parseArgs(argv) {
   const names = {
     '--weights': 'weights', '--alpha': 'alpha', '--threads': 'threads', '--restart': 'restart',
     '--save-minutes': 'saveMinutes', '--report-seconds': 'reportSeconds', '--hours': 'hours',
+    '--backend': 'backend', '--gpu-games': 'gpuGames', '--from': 'source', '--layout': 'layout',
   };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--no-tc' || argv[i] === '--no-optimistic') {
@@ -237,7 +256,7 @@ function parseArgs(argv) {
     }
     const key = names[argv[i]];
     if (!key || i + 1 >= argv.length) throw new Error(`Unknown or incomplete argument: ${argv[i]}`);
-    out[key] = key === 'weights' ? argv[++i] : Number(argv[++i]);
+    out[key] = ['weights', 'backend', 'source', 'layout'].includes(key) ? argv[++i] : Number(argv[++i]);
   }
   return out;
 }
@@ -245,12 +264,18 @@ function parseArgs(argv) {
 function cli() {
   const args = parseArgs(process.argv.slice(2));
   const trainer = startTraining(args, console.log);
-  const finish = () => {
-    trainer.stop();
-    process.exit(0);
+  const finish = async () => {
+    try { await trainer.stop(); process.exit(0); }
+    catch (error) { console.error(error.message); process.exit(1); }
   };
-  if (Number.isFinite(args.hours)) setTimeout(finish, args.hours * 3600000);
+  let deadline;
+  if (Number.isFinite(args.hours)) deadline = setTimeout(finish, args.hours * 3600000);
+  if (trainer.finished) trainer.finished.then(() => {
+    clearTimeout(deadline);
+    if (trainer.error) process.exitCode = 1;
+  });
   process.on('SIGINT', finish);
+  process.on('SIGTERM', finish);
 }
 
 function worker() {

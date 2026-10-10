@@ -14,6 +14,8 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 const { startTraining, listNetworks, readHistory, DEFAULTS } = require('./train.js');
+const { probeGpu } = require('./gpu.js');
+const { NETWORK_LAYOUTS } = require('./2048-algo.user.js');
 
 const args = process.argv.slice(2);
 const argValue = (flag, fallback) => (args.includes(flag) ? args[args.indexOf(flag) + 1] : fallback);
@@ -26,6 +28,8 @@ const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/; // network names map straight to files
 let trainer = null;
 let lastError = '';
 const lines = [];
+let gpu = { available: false, checking: true, reason: 'Checking NVIDIA GPU…' };
+probeGpu().then((result) => { gpu = result; });
 
 function note(line) {
   console.log(line);
@@ -38,18 +42,24 @@ function state() {
     cores: os.cpus().length,
     memoryGB: os.totalmem() / 2 ** 30,
     dir: DIR,
+    pathSeparator: path.sep,
+    gpu,
     training: trainer && !trainer.stopped ? {
       name: path.basename(trainer.files.bin, '.bin'),
       tc: trainer.useTc,
       alpha: trainer.alpha,
+      layout: trainer.layout || 'standard',
       threads: trainer.threads,
+      backend: trainer.backend,
+      gpuGames: trainer.gpuGames,
+      status: trainer.status || 'training',
       restart: trainer.restart,
       startedAt: trainer.startedAt,
       summary: trainer.summary(),
     } : null,
     networks: listNetworks(DIR),
     lines: lines.slice(-40),
-    error: lastError,
+    error: trainer && trainer.error || lastError,
   };
 }
 
@@ -57,17 +67,32 @@ function start(body) {
   if (trainer && !trainer.stopped) throw new Error('Already training; stop first.');
   const name = String(body.name || '');
   if (!NAME.test(name)) throw new Error('Use lowercase letters, digits and dashes for the name.');
+  const backend = body.backend || 'cpu';
+  if (!['cpu', 'gpu'].includes(backend)) throw new Error('Choose CPU or NVIDIA GPU.');
+  if (backend === 'gpu' && !gpu.available) throw new Error(gpu.reason || 'GPU is not ready.');
   const threads = Math.round(Number(body.threads));
-  if (!(threads >= 1 && threads <= os.cpus().length)) throw new Error(`Threads must be 1 to ${os.cpus().length}.`);
+  if (backend === 'cpu' && !(threads >= 1 && threads <= os.cpus().length)) throw new Error(`Threads must be 1 to ${os.cpus().length}.`);
   const restart = Number(body.restart);
   if (!(restart >= 0 && restart <= 0.9)) throw new Error('Restart share must be 0 to 0.9.');
   const alpha = body.alpha === '' || body.alpha == null ? NaN : Number(body.alpha);
   if (!Number.isNaN(alpha) && !(alpha > 0 && alpha <= 1)) throw new Error('Step size must be above 0 and at most 1, or blank for automatic.');
+  const layout = String(body.layout || 'standard');
+  if (!Object.keys(NETWORK_LAYOUTS).includes(layout)) throw new Error('Pick a network size.');
+  // A new network can start from a smaller one (fewer stages) in the same folder.
+  const from = String(body.from || '');
+  if (from && !NAME.test(from)) throw new Error('Pick a network to start from.');
+  const source = from ? path.join(DIR, `${from}.bin`) : '';
+  const sourceNetwork = source && listNetworks(DIR).find((n) => n.name === from);
+  if (source && !(sourceNetwork && sourceNetwork.layout &&
+      NETWORK_LAYOUTS[sourceNetwork.layout].stages < NETWORK_LAYOUTS[layout].stages)) {
+    throw new Error('Start from a smaller network (fewer stages).');
+  }
   lastError = '';
-  // tc and optimistic only matter for a new network; existing ones keep theirs.
+  // tc, optimistic, layout and from only matter for a new network; existing ones keep theirs.
   trainer = startTraining({
     weights: path.join(DIR, `${name}.bin`), threads, restart, alpha, reportSeconds: 30,
     noTc: body.tc === false, optimistic: body.optimistic === false ? 0 : DEFAULTS.optimistic,
+    backend, gpuGames: Number(body.gpuGames || DEFAULTS.gpuGames), layout, source,
   }, note);
 }
 
@@ -123,10 +148,10 @@ const server = http.createServer(async (req, res) => {
       if (!/^application\/json\b/.test(req.headers['content-type'] || '')) return send(res, 415, 'JSON only');
       const body = JSON.parse((await readBody(req)) || '{}');
       if (url.pathname === '/api/start') start(body);
-      else if (url.pathname === '/api/stop') trainer && trainer.stop();
+      else if (url.pathname === '/api/stop') { if (trainer) await trainer.stop(); }
       else if (url.pathname === '/api/save') {
         if (!trainer || trainer.stopped) throw new Error('Not training.');
-        trainer.save();
+        await trainer.save();
       } else return send(res, 404, 'Not found');
       return send(res, 200, JSON.stringify(state()), 'application/json');
     }
@@ -153,7 +178,12 @@ server.listen(PORT, '127.0.0.1', () => {
   execFile(cmd, cmdArgs, () => {});
 });
 
-process.on('SIGINT', () => {
-  if (trainer) trainer.stop();
-  process.exit(0);
-});
+let closing = false;
+async function shutdown() {
+  if (closing) return;
+  closing = true;
+  try { if (trainer) await trainer.stop(); process.exit(0); }
+  catch (error) { console.error(error.message); process.exit(1); }
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

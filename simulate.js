@@ -8,7 +8,7 @@
 //   learned search:             --weights FILE [--search-depth N]
 
 const fs = require('fs');
-const { createEngine, isNetworkSize, DIR_NAMES } = require('./2048-algo.user.js');
+const { createEngine, networkLayout, NETWORK_LAYOUTS, DIR_NAMES } = require('./2048-algo.user.js');
 
 const args = parseArgs(process.argv.slice(2));
 
@@ -153,13 +153,28 @@ function playGame(engine, random, gameNo) {
   return { score, moves, maxTile: Math.max(...grid.flat()), avgMs: totalMs / Math.max(1, moves), slowestMs };
 }
 
+// One Float32Array per stage, read in chunks: Node can't read a 2.7 GB file in one call.
+function readWeightsFile(file) {
+  const size = fs.statSync(file).size;
+  const layout = size % 4 ? null : networkLayout(size / 4);
+  if (!layout) throw new Error(`${file} is not a weights file`);
+  const { patterns, stages } = NETWORK_LAYOUTS[layout];
+  const fd = fs.openSync(file, 'r');
+  const parts = [];
+  for (let s = 0; s < stages; s++) {
+    const bytes = new Uint8Array((patterns << 24) * 4);
+    for (let off = 0; off < bytes.length; off += 1 << 26) {
+      fs.readSync(fd, bytes, off, Math.min(1 << 26, bytes.length - off), s * bytes.length + off);
+    }
+    parts.push(new Float32Array(bytes.buffer));
+  }
+  fs.closeSync(fd);
+  return parts;
+}
+
 const random = makeRandom(args.seed);
 const engine = createEngine({ depthBias: args.depthBias, maxDepth: args.maxDepth });
-if (args.weights) {
-  const buf = fs.readFileSync(args.weights);
-  if (buf.length % 4 || !isNetworkSize(buf.length / 4)) throw new Error(`${args.weights} is not a weights file`);
-  engine.setWeights(new Float32Array(buf.buffer, buf.byteOffset, buf.length / 4));
-}
+if (args.weights) engine.setWeights(readWeightsFile(args.weights));
 verifyMoves(engine, random, 20000);
 verifyBigTiles(engine);
 if (args.verifyOnly) process.exit(0);

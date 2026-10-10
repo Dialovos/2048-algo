@@ -9,4 +9,3 @@ __pycache__/
 
 # Keep training state, logs, and older networks local
 weights/*
-!weights/alpha-single.bin
